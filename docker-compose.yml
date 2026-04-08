@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: orbital
       POSTGRES_PASSWORD: orbital
@@ -11,6 +11,16 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U orbital -d orbital_takehome"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 5s
       retries: 10
@@ -30,10 +40,50 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://orbital:orbital@db:5432/orbital_takehome
+      DATABASE_URL_PSYCOPG: postgresql://orbital:orbital@db:5432/orbital_takehome
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=2)",
+        ]
+      start_period: 180s
+      interval: 5s
+      timeout: 3s
+      retries: 60
     command: uv run uvicorn takehome.web.app:app --reload --host 0.0.0.0 --port 8000
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    volumes:
+      - ./backend/src:/app/backend/src
+      - ./uploads:/app/uploads
+      - ./pyproject.toml:/app/pyproject.toml
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orbital:orbital@db:5432/orbital_takehome
+      DATABASE_URL_PSYCOPG: postgresql://orbital:orbital@db:5432/orbital_takehome
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uv run celery -A takehome.services.document:celery_app worker --loglevel=info
 
   frontend:
     build:
@@ -49,7 +99,8 @@ services:
       - ./frontend/tsconfig.json:/app/tsconfig.json
       - ./frontend/biome.json:/app/biome.json
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:
