@@ -14,14 +14,14 @@ setup:
     docker compose build
     @echo ""
     @echo "Setup complete! Next steps:"
-    @echo "  1. Edit .env with your Anthropic API key"
+    @echo "  1. Edit .env with your OpenAI and Tavily API keys"
     @echo "  2. Run 'just dev' to start everything"
 
 # =============================================================================
 # Development
 # =============================================================================
 
-# Start the full stack (Postgres, backend, frontend) with hot reload
+# Start the full stack with hot reload. Backend must pass /healthz before frontend starts (avoids Vite proxy ECONNREFUSED).
 dev:
     docker compose up
 
@@ -41,6 +41,10 @@ reset:
 # View backend logs
 logs-backend:
     docker compose logs -f backend
+
+# View Celery worker logs
+logs-celery:
+    docker compose logs -f celery-worker
 
 # View all logs
 logs:

@@ -1,5 +1,4 @@
 # Environment
-.env
 
 # Python
 __pycache__/
@@ -22,7 +21,6 @@ uploads/*
 CLAUDE.local.md
 
 # IDE
-.vscode/
 .idea/
 
 # OS
@@ -34,3 +32,4 @@ pgdata/
 
 # Internal data generation scripts
 scripts/generate-usage-data.py
+config.bat

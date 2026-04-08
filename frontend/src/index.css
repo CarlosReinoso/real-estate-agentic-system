@@ -5,11 +5,16 @@
 body {
 	margin: 0;
 	padding: 0;
-	font-family: "IBM Plex Sans", system-ui, sans-serif;
-	background-color: #fafafa;
-	color: #171717;
+	font-family: "DM Sans", system-ui, sans-serif;
+	background-color: #f8fafc;
+	color: #0f172a;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+	/* Global app scale so 100% browser zoom remains comfortably readable. */
+	--ui-scale: 1;
 }
 
 #root {
@@ -17,9 +22,33 @@ body {
 	overflow: hidden;
 }
 
+/* Chromium/Electron: crisp scaling. */
+@supports (zoom: 1) {
+	#root {
+		zoom: var(--ui-scale);
+		height: calc(100vh / var(--ui-scale));
+	}
+}
+
+/* Fallback for browsers without `zoom` support. */
+@supports not (zoom: 1) {
+	#root {
+		transform: scale(var(--ui-scale));
+		transform-origin: top left;
+		width: calc(100% / var(--ui-scale));
+		height: calc(100vh / var(--ui-scale));
+	}
+}
+
 /* Scrollbar styling */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: #d4d4d4 transparent;
+}
+
 ::-webkit-scrollbar {
-	width: 6px;
+	width: 4px;
+	height: 4px;
 }
 
 ::-webkit-scrollbar-track {
@@ -28,11 +57,20 @@ body {
 
 ::-webkit-scrollbar-thumb {
 	background-color: #d4d4d4;
-	border-radius: 3px;
+	border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
 	background-color: #a3a3a3;
+}
+
+.no-scrollbar {
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+	display: none;
 }
 
 /* Prose styling for markdown content */
@@ -81,9 +119,9 @@ body {
 }
 
 .prose code {
-	font-family: "IBM Plex Mono", monospace;
+	font-family: "JetBrains Mono", ui-monospace, monospace;
 	font-size: 0.875em;
-	background-color: #f5f5f5;
+	background-color: #f1f5f9;
 	padding: 0.125em 0.375em;
 	border-radius: 0.25em;
 }
@@ -104,15 +142,16 @@ body {
 }
 
 .prose blockquote {
-	border-left: 3px solid #d4d4d4;
+	border-left: 3px solid #cbd5e1;
 	padding-left: 1em;
 	margin: 0.75em 0;
-	color: #525252;
+	color: #475569;
 }
 
 .prose a {
-	color: #2563eb;
+	color: #4f46e5;
 	text-decoration: underline;
+	text-underline-offset: 2px;
 }
 
 .prose table {
@@ -123,12 +162,12 @@ body {
 
 .prose th,
 .prose td {
-	border: 1px solid #e5e5e5;
+	border: 1px solid #e2e8f0;
 	padding: 0.5em 0.75em;
 	text-align: left;
 }
 
 .prose th {
-	background-color: #f5f5f5;
+	background-color: #f1f5f9;
 	font-weight: 600;
 }
