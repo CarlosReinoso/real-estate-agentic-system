@@ -1,5 +1,4 @@
 # Environment
-.env
 
 # Python
 __pycache__/
@@ -34,3 +33,4 @@ pgdata/
 
 # Internal data generation scripts
 scripts/generate-usage-data.py
+config.bat

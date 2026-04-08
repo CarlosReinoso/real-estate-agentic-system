@@ -1,18 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	RAGAS_METRICS_POLL_INTERVAL_MS,
+	RAGAS_METRICS_POLL_MAX_ATTEMPTS,
+} from "../constants";
 import * as api from "../lib/api";
-import type { Message } from "../types";
+import type { Citation, Message } from "../types";
 
-export function useMessages(conversationId: string | null) {
+export function useMessages(
+	conversationId: string | null,
+	onConversationTitle?: () => void,
+) {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [streaming, setStreaming] = useState(false);
 	const [streamingContent, setStreamingContent] = useState("");
+	const [agentStatus, setAgentStatus] = useState<string | null>(null);
+	const [citations, setCitations] = useState<Citation[]>([]);
 	const abortRef = useRef<AbortController | null>(null);
+	const ragasPollTimerRef = useRef<number | null>(null);
+	const ragasPollInFlightRef = useRef(false);
+	const pendingRagasIdsRef = useRef<Set<string>>(new Set());
+	const ragasAttemptsRef = useRef<Map<string, number>>(new Map());
+
+	const extractLatestCitations = useCallback((items: Message[]): Citation[] => {
+		for (let i = items.length - 1; i >= 0; i -= 1) {
+			const m = items[i];
+			if (!m) continue;
+			if (m.role === "assistant" && m.type === "chat" && m.citations?.length) {
+				return m.citations;
+			}
+		}
+		return [];
+	}, []);
 
 	const refresh = useCallback(async () => {
 		if (!conversationId) {
 			setMessages([]);
+			setAgentStatus(null);
+			setCitations([]);
 			return;
 		}
 		try {
@@ -20,21 +46,127 @@ export function useMessages(conversationId: string | null) {
 			setError(null);
 			const data = await api.fetchMessages(conversationId);
 			setMessages(data);
+			setCitations(extractLatestCitations(data));
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to load messages");
 		} finally {
 			setLoading(false);
 		}
-	}, [conversationId]);
+	}, [conversationId, extractLatestCitations]);
 
+	const stopRagasPoller = useCallback(() => {
+		if (ragasPollTimerRef.current != null) {
+			window.clearInterval(ragasPollTimerRef.current);
+			ragasPollTimerRef.current = null;
+		}
+	}, []);
+
+	const upsertMessageRagas = useCallback(
+		(messageId: string, metrics: Record<string, unknown> | null) => {
+			setMessages((prev: Message[]) =>
+				prev.map((m: Message) => (m.id === messageId ? { ...m, ragas_metrics: metrics } : m)),
+			);
+		},
+		[],
+	);
+
+	const startRagasPoller = useCallback(() => {
+		if (ragasPollTimerRef.current != null) return;
+		ragasPollTimerRef.current = window.setInterval(async () => {
+			if (ragasPollInFlightRef.current) return;
+			if (pendingRagasIdsRef.current.size === 0) {
+				stopRagasPoller();
+				return;
+			}
+			ragasPollInFlightRef.current = true;
+			try {
+				const pendingIds: string[] = Array.from(pendingRagasIdsRef.current);
+				await Promise.all(
+					pendingIds.map(async (messageId) => {
+						try {
+							const metrics = await api.fetchMessageRagas(messageId);
+							upsertMessageRagas(messageId, metrics);
+							const st =
+								metrics && typeof metrics === "object" && "status" in metrics
+									? String((metrics as { status?: string }).status)
+									: "";
+							const attempts = ragasAttemptsRef.current.get(messageId) ?? 0;
+							if (st !== "pending") {
+								pendingRagasIdsRef.current.delete(messageId);
+								ragasAttemptsRef.current.delete(messageId);
+								return;
+							}
+							if (attempts + 1 >= RAGAS_METRICS_POLL_MAX_ATTEMPTS) {
+								pendingRagasIdsRef.current.delete(messageId);
+								ragasAttemptsRef.current.delete(messageId);
+								return;
+							}
+							ragasAttemptsRef.current.set(messageId, attempts + 1);
+						} catch {
+							const attempts = ragasAttemptsRef.current.get(messageId) ?? 0;
+							if (attempts + 1 >= RAGAS_METRICS_POLL_MAX_ATTEMPTS) {
+								pendingRagasIdsRef.current.delete(messageId);
+								ragasAttemptsRef.current.delete(messageId);
+							} else {
+								ragasAttemptsRef.current.set(messageId, attempts + 1);
+							}
+						}
+					}),
+				);
+			} finally {
+				ragasPollInFlightRef.current = false;
+			}
+		}, RAGAS_METRICS_POLL_INTERVAL_MS);
+	}, [stopRagasPoller, upsertMessageRagas]);
+
+	// On conversation switch: load message history
 	useEffect(() => {
-		refresh();
-		return () => {
-			if (abortRef.current) {
-				abortRef.current.abort();
+		if (!conversationId) {
+			setMessages([]);
+			setStreaming(false);
+			setStreamingContent("");
+			setAgentStatus(null);
+			setCitations([]);
+			pendingRagasIdsRef.current.clear();
+			ragasAttemptsRef.current.clear();
+			stopRagasPoller();
+			return;
+		}
+
+		let cancelled = false;
+
+		const init = async () => {
+			try {
+				setLoading(true);
+				setError(null);
+				setStreamingContent("");
+				setAgentStatus(null);
+				setCitations([]);
+
+				const msgs = await api.fetchMessages(conversationId);
+
+				if (cancelled) return;
+				setMessages(msgs);
+				setCitations(extractLatestCitations(msgs));
+				setStreaming(false);
+			} catch (err) {
+				if (!cancelled) {
+					setError(err instanceof Error ? err.message : "Failed to load");
+				}
+			} finally {
+				if (!cancelled) setLoading(false);
 			}
 		};
-	}, [refresh]);
+
+		init();
+
+		return () => {
+			cancelled = true;
+			if (abortRef.current) abortRef.current.abort();
+			abortRef.current = null;
+			stopRagasPoller();
+		};
+	}, [conversationId, extractLatestCitations, stopRagasPoller]);
 
 	const send = useCallback(
 		async (content: string) => {
@@ -45,98 +177,107 @@ export function useMessages(conversationId: string | null) {
 				conversation_id: conversationId,
 				role: "user",
 				content,
+				type: "chat",
 				sources_cited: 0,
 				created_at: new Date().toISOString(),
 			};
 
-			setMessages((prev) => [...prev, userMessage]);
+			setMessages((prev: Message[]) => [...prev, userMessage]);
 			setStreaming(true);
 			setStreamingContent("");
+			setAgentStatus("Thinking");
+			setCitations([]);
 			setError(null);
 
 			try {
-				const response = await api.sendMessage(conversationId, content);
-
-				if (!response.body) {
-					throw new Error("No response body");
-				}
-
-				const reader = response.body.getReader();
-				const decoder = new TextDecoder();
-				let accumulated = "";
-				let buffer = "";
-
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-
-					buffer += decoder.decode(value, { stream: true });
-					const lines = buffer.split("\n");
-					// Keep the last potentially incomplete line in the buffer
-					buffer = lines.pop() ?? "";
-
-					for (const line of lines) {
-						const trimmed = line.trim();
-						if (!trimmed || !trimmed.startsWith("data: ")) continue;
-
-						const data = trimmed.slice(6);
-						if (data === "[DONE]") continue;
-
-						try {
-							const parsed = JSON.parse(data) as {
-								type?: string;
-								content?: string;
-								delta?: string;
-								message?: Message;
-							};
-
-							if (parsed.type === "delta" && parsed.delta) {
-								accumulated += parsed.delta;
-								setStreamingContent(accumulated);
-							} else if (parsed.type === "content" && parsed.content) {
-								accumulated += parsed.content;
-								setStreamingContent(accumulated);
-							} else if (parsed.type === "message" && parsed.message) {
-								// Final message from server
-								setMessages((prev) => [...prev, parsed.message as Message]);
-								accumulated = "";
-							} else if (parsed.content && !parsed.type) {
-								// Fallback: plain content field
-								accumulated += parsed.content;
-								setStreamingContent(accumulated);
+				const controller = new AbortController();
+				abortRef.current = controller;
+				const knownIds = new Set(messages.map((m: Message) => m.id));
+				knownIds.add(userMessage.id);
+				await api.streamMessage(
+					conversationId,
+					content,
+					(event) => {
+						switch (event.type) {
+							case "content":
+								if (event.content) {
+									setAgentStatus(null);
+									setStreamingContent((prev: string) => prev + event.content);
+								}
+								break;
+							case "plan":
+								setAgentStatus("Planning…");
+								break;
+							case "replan":
+								setAgentStatus("Adjusting plan…");
+								break;
+							case "tool_start":
+								if (typeof event.phase === "string" && event.phase) {
+									setAgentStatus(event.phase);
+								}
+								break;
+							case "tool_done":
+							case "tool_error":
+								if (typeof event.short_result === "string" && event.short_result) {
+									setAgentStatus(event.short_result);
+								}
+								break;
+							case "citations":
+								if (event.citations) setCitations(event.citations);
+								break;
+							case "message":
+								if (event.message && !knownIds.has(event.message.id)) {
+									knownIds.add(event.message.id);
+									setMessages((prev: Message[]) => [...prev, event.message as Message]);
+									setStreamingContent("");
+									setAgentStatus(null);
+								}
+								break;
+							case "error":
+								setError(event.error || "An error occurred");
+								setAgentStatus(null);
+								break;
+							case "conversation_title":
+								onConversationTitle?.();
+								break;
+							case "done": {
+								setAgentStatus(null);
+								const queued = Boolean(event.ragas_eval_queued);
+								const messageId = event.message_id;
+								if (queued && typeof messageId === "string" && messageId) {
+									pendingRagasIdsRef.current.add(messageId);
+									ragasAttemptsRef.current.set(messageId, 0);
+									startRagasPoller();
+								}
+								break;
 							}
-						} catch {
-							// Skip invalid JSON lines
 						}
-					}
-				}
-
-				// If we accumulated content but never got a final message,
-				// create a synthetic assistant message
-				if (accumulated) {
-					const assistantMessage: Message = {
-						id: `stream-${Date.now()}`,
-						conversation_id: conversationId,
-						role: "assistant",
-						content: accumulated,
-						sources_cited: 0,
-						created_at: new Date().toISOString(),
-					};
-					setMessages((prev) => [...prev, assistantMessage]);
-				}
-
-				// Refresh to get server-canonical messages
-				const freshMessages = await api.fetchMessages(conversationId);
-				setMessages(freshMessages);
+					},
+					controller.signal,
+				);
+				const refreshed = await api.fetchMessages(conversationId);
+				setMessages(refreshed);
+				setCitations(extractLatestCitations(refreshed));
 			} catch (err) {
-				if (err instanceof DOMException && err.name === "AbortError") return;
-				setError(err instanceof Error ? err.message : "Failed to send message");
-			} finally {
+				if (err instanceof Error && err.message.includes("409")) {
+					setError("Agent is still processing a previous message");
+				} else {
+					setError(err instanceof Error ? err.message : "Failed to send message");
+				}
 				setStreaming(false);
-				setStreamingContent("");
 			}
+			setStreaming(false);
+			setAgentStatus(null);
+			abortRef.current = null;
 		},
-		[conversationId, streaming],
+		[
+			conversationId,
+			streaming,
+			extractLatestCitations,
+			messages,
+			onConversationTitle,
+			startRagasPoller,
+		],
 	);
 
 	return {
@@ -145,6 +286,8 @@ export function useMessages(conversationId: string | null) {
 		error,
 		streaming,
 		streamingContent,
+		agentStatus,
+		citations,
 		send,
 		refresh,
 	};
